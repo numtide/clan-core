@@ -24,7 +24,7 @@
     "@storybook/addon-a11y": "^9.1.13",
     "@storybook/addon-docs": "^9.1.13",
     "@storybook/addon-links": "^9.1.13",
-    "@storybook/addon-vitest": "^9.1.13",
+    "@storybook/addon-vitest": "^9.1.21",
     "@types/node": "^22.15.19",
     "@types/three": "^0.176.0",
     "@vitest/browser": "^3.2.3",
