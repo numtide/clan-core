@@ -373,7 +373,16 @@ class Remote:
                 ],
             )
 
-        if control_master:
+        # A caller that deploys several machines opens the connections
+        # itself, once: every ssh of the update then goes through them, the
+        # ones of `nix copy` too. With a key that asks for a PIN or a touch
+        # per use, that is one prompt per machine in place of one per ssh.
+        shared = os.environ.get("CLAN_SSH_CONTROL_PATH")
+        if shared:
+            ssh_opts.extend(
+                ["-o", "ControlMaster=auto", "-o", f"ControlPath={shared}"],
+            )
+        elif control_master:
             if self._control_path_dir is None:
                 msg = "Bug! Control path directory is not set. Please use Remote.ssh_control_master() or set control_master to False."
                 raise ClanError(msg)
