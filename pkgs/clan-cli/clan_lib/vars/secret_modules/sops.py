@@ -1,3 +1,5 @@
+import hashlib
+import logging
 import shutil
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ from clan_cli.secrets.secrets import (
 )
 from clan_cli.secrets.sops import load_age_plugins
 
+from clan_lib.cmd import Log, RunOpts
 from clan_lib.errors import ClanError
 from clan_lib.flake import Flake
 from clan_lib.git import commit_files
@@ -37,6 +40,12 @@ from clan_lib.vars._types import (
     StoreBase,
     StoreRequest,
 )
+
+
+log = logging.getLogger(__name__)
+
+# in the upload directory: the digest of the encrypted files it was made from
+DIGEST_FILE = ".clan-source-digest"
 
 
 @dataclass
@@ -298,6 +307,27 @@ class SecretStore(StoreBase):
             vars_sops_secret_upload_dir(current_system(), [machine])
         )[machine]["sops"]["secretUploadDirectory"]
 
+    def _upload_digest(
+        self, generators: Sequence[GeneratorStore], machine: str, phases: list[str]
+    ) -> str:
+        """Identify what `populate_dir` would write, from the encrypted files alone."""
+        sources = []
+        if "users" in phases or "services" in phases:
+            sources.append(sops_secrets_folder(self.clan_dir) / f"{machine}-age.key")
+        if "activation" in phases:
+            sources += [
+                self.secret_path(generator.key, file.name)
+                for generator in generators
+                for file in generator.files
+                if file.needed_for == "activation"
+            ]
+        digest = hashlib.sha256(" ".join(phases).encode())
+        for source in sorted(sources):
+            secret = source / "secret"
+            digest.update(str(source.relative_to(self.clan_dir)).encode())
+            digest.update(secret.read_bytes() if secret.exists() else b"")
+        return digest.hexdigest()
+
     @override
     def upload(
         self,
@@ -309,10 +339,23 @@ class SecretStore(StoreBase):
         if "partitioning" in phases:
             msg = "Cannot upload partitioning secrets"
             raise NotImplementedError(msg)
+        # An unchanged set of encrypted files decrypts to what the machine
+        # already has. Skipping it lets a person who cannot decrypt the
+        # secrets deploy every change that does not touch them.
+        upload_dir = Path(self.get_upload_directory(machine))
+        digest = self._upload_digest(generators, machine, phases)
+        have = host.run(
+            ["cat", str(upload_dir / DIGEST_FILE)],
+            RunOpts(check=False, log=Log.NONE, trace=False),
+        )
+        if have.returncode == 0 and have.stdout.strip() == digest:
+            log.info(f"{machine}: secrets unchanged, not uploaded")
+            return
         with TemporaryDirectory(prefix="sops-upload-") as _tempdir:
             sops_upload_dir = Path(_tempdir).resolve()
             self.populate_dir(generators, machine, sops_upload_dir, phases)
-            upload(host, sops_upload_dir, Path(self.get_upload_directory(machine)))
+            (sops_upload_dir / DIGEST_FILE).write_text(digest)
+            upload(host, sops_upload_dir, upload_dir)
 
     def exists(self, generator: GeneratorId, name: str) -> bool:
         secret_folder = self.secret_path(generator, name)

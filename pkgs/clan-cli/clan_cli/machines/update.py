@@ -182,6 +182,9 @@ def get_machines_for_update(
 
 
 def update_command(args: argparse.Namespace) -> None:
+    os.environ["CLAN_DEPLOY_ACTION"] = args.action
+    if args.force:
+        os.environ["CLAN_DEPLOY_FORCE"] = "1"
     if args.no_check:
         os.environ["NIXOS_NO_CHECK"] = "1"
     try:
@@ -317,5 +320,21 @@ def register_update_parser(parser: argparse.ArgumentParser) -> None:
         help="Skip NixOS pre-switch safety checks (switch inhibitors). "
         "Use when you know the live switch is safe despite critical component changes. "
         "Equivalent to setting NIXOS_NO_CHECK=1.",
+    )
+    parser.add_argument(
+        "--action",
+        choices=["switch", "boot", "test", "dry-activate"],
+        default="switch",
+        help="What to do with the built system, as with nixos-rebuild: "
+        "switch (the default), boot (activate at the next boot), "
+        "test (activate now, without a boot entry), "
+        "dry-activate (show what a switch would do).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Update a machine although its deploy record says that it runs "
+        "something this checkout does not contain. "
+        "Equivalent to setting CLAN_DEPLOY_FORCE=1.",
     )
     parser.set_defaults(func=update_command)

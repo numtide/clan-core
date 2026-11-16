@@ -17,6 +17,7 @@ from clan_lib.colors import AnsiColor
 from clan_lib.docs import guides_url
 from clan_lib.errors import ClanCmdError, ClanError
 from clan_lib.flake import Flake
+from clan_lib.machines import deploy_record
 from clan_lib.machines.machines import Machine
 from clan_lib.nix import nix_build, nix_command, nix_metadata
 from clan_lib.ssh.localhost import LocalHost
@@ -434,20 +435,25 @@ def _nixos_activate(
         )
         raise ClanError(msg)
 
+    # `test` and `dry-activate` make no generation, as with nixos-rebuild
+    action = deploy_record.action()
+    persist = action in ("switch", "boot")
+
     # Set the system profile so the new generation survives a reboot.
-    target_host_root.run(
-        [
-            "nix-env",
-            "-p",
-            "/nix/var/nix/profiles/system",
-            "--set",
-            config_path,
-        ],
-        RunOpts(
-            log=Log.BOTH,
-            prefix=machine_name,
-        ),
-    )
+    if persist:
+        target_host_root.run(
+            [
+                "nix-env",
+                "-p",
+                "/nix/var/nix/profiles/system",
+                "--set",
+                config_path,
+            ],
+            RunOpts(
+                log=Log.BOTH,
+                prefix=machine_name,
+            ),
+        )
 
     switch_bin = (
         f"{config_path}/specialisation/{specialisation}"
@@ -495,24 +501,27 @@ def _nixos_activate(
     # --- Step 1: Register the new generation in the bootloader. --------
     # This ensures the machine boots into the new config even if the live
     # switch below fails.  ``boot`` never triggers switch inhibitors.
-    boot_ret = target_host_root.run(
-        switch_cmd("boot"),
-        RunOpts(
-            check=False,
-            log=Log.BOTH,
-            prefix=machine_name,
-        ),
-    )
-    if boot_ret.returncode != 0:
-        msg = (
-            f"switch-to-configuration boot failed on '{machine_name}' "
-            f"(exit code {boot_ret.returncode}). See above for details."
+    if persist:
+        boot_ret = target_host_root.run(
+            switch_cmd("boot"),
+            RunOpts(
+                check=False,
+                log=Log.BOTH,
+                prefix=machine_name,
+            ),
         )
-        raise ClanError(msg)
+        if boot_ret.returncode != 0:
+            msg = (
+                f"switch-to-configuration boot failed on '{machine_name}' "
+                f"(exit code {boot_ret.returncode}). See above for details."
+            )
+            raise ClanError(msg)
+    if action == "boot":
+        return
 
     # --- Step 2: Try to live-switch into the new configuration. --------
     switch_ret = target_host_root.run(
-        switch_cmd("switch"),
+        switch_cmd(action),
         RunOpts(
             check=False,
             log=Log.BOTH,
@@ -539,7 +548,7 @@ def _nixos_activate(
     # Retry once (switch-to-configuration is idempotent).
     log.info("activation returned %d — retrying", switch_ret.returncode)
     retry_ret = target_host_root.run(
-        switch_cmd("switch"),
+        switch_cmd(action),
         RunOpts(
             check=False,
             log=Log.BOTH,
@@ -608,8 +617,16 @@ def run_machine_update(
         # Some operations require root privileges on the target host.
         target_host_root = stack.enter_context(_target_host.become_root())
 
+        # before anything changes on the machine; a specialisation is not the
+        # system a record names
+        track = machine._class_ == "nixos" and specialisation is None
+        if track:
+            deploy_record.check(machine.flake, target_host_root, machine.name)
+
         # Upload secrets to the target host using root
-        upload_secret_vars(machine, target_host_root)
+        # a dry run changes nothing on the machine
+        if deploy_record.action() != "dry-activate":
+            upload_secret_vars(machine, target_host_root)
 
         # Upload the flake's source to the build host.  When building
         # locally the sources are already present, so we only need the
@@ -627,6 +644,7 @@ def run_machine_update(
                 target_host=_target_host,
                 target_host_root=target_host_root,
                 specialisation=specialisation,
+                track=track,
             )
         elif machine._class_ == "darwin":
             _update_darwin(
@@ -648,6 +666,7 @@ def _update_nixos(
     target_host: "Host",
     target_host_root: "Host",
     specialisation: str | None,
+    track: bool,
 ) -> None:
     """Build → copy → profile → activate pipeline for NixOS machines."""
     nix_options = _nix_options_from_machine(machine)
@@ -700,9 +719,16 @@ def _update_nixos(
         return
 
     # 3 + 4. Set profile and activate
-    _nixos_activate(
-        config_path, target_host_root, machine.name, specialisation=specialisation
-    )
+    try:
+        _nixos_activate(
+            config_path, target_host_root, machine.name, specialisation=specialisation
+        )
+    finally:
+        # also after a failed switch: the generation exists by then
+        if track:
+            deploy_record.write(
+                machine.flake, target_host_root, machine.name, config_path
+            )
 
 
 def _build_darwin_rebuild_cmd(
