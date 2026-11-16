@@ -10,6 +10,38 @@ from clan_lib.ssh.host import Host
 MIN_SAFE_DEPTH = 3  # Minimum path depth for safety
 MIN_EXCEPTION_DEPTH = 2  # Minimum depth for allowed exceptions
 
+# Runs on the target with the tarball on stdin: $0 the directory to fill,
+# $1 its mode, $2 whether the tarball is the whole content of the directory.
+#
+# An upload must not destroy what it replaces. A hung filesystem, a dropped
+# connection or a full disk in the middle would otherwise leave the target
+# without, for example, its only sops key. So the new entries are extracted
+# next to the old ones and each takes its place by rename, with POSIX tools only
+# (a target can be a Mac); the temporary
+# directory is inside the destination, which may be a mount point.
+REPLACE_ATOMICALLY = """
+set -eu
+shopt -s dotglob nullglob
+if [ "$2" = 1 ]; then install -d -m "$1" "$0"; fi
+tmp=$(mktemp -d "$0/.upload.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/new" "$tmp/old"
+tar -C "$tmp/new" -xzf -
+sync
+if [ "$2" = 1 ]; then
+  for old in "$0"/*; do
+    [ "$old" = "$tmp" ] || [ -e "$tmp/new/${old##*/}" ] || rm -rf "$old"
+  done
+fi
+for new in "$tmp/new"/*; do
+  old=$0/${new##*/}
+  # rename(2) replaces a file in one step, but not a directory
+  if [ -d "$old" ]; then mv "$old" "$tmp/old/"; fi
+  mv -f "$new" "$old"
+done
+sync
+"""
+
 
 def upload(
     host: Host,
@@ -92,11 +124,12 @@ def upload(
                 with local_src.open("rb") as f:
                     tar.addfile(tarinfo, f)
 
-        cmd = None
         if local_src.is_dir():
-            cmd = 'install -d -m "$1" "$0" && find "$0" -mindepth 1 -delete && tar -C "$0" -xzf -'
+            # the tarball holds the directory's content: replace it all
+            dest, prune = remote_dest, "1"
         elif local_src.is_file():
-            cmd = 'rm -f "$0" && tar -C "$(dirname "$0")" -xzf -'
+            # the tarball holds the one file, under its remote name
+            dest, prune = remote_dest.parent, "0"
         else:
             msg = f"Unsupported source type: {local_src}"
             raise ClanError(msg)
@@ -107,9 +140,10 @@ def upload(
                 [
                     "bash",
                     "-c",
-                    cmd,
-                    str(remote_dest),
+                    REPLACE_ATOMICALLY,
+                    str(dest),
                     f"{dir_mode:o}",
+                    prune,
                 ],
                 quiet=True,
                 opts=RunOpts(
