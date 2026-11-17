@@ -328,7 +328,8 @@ def register_update_parser(parser: argparse.ArgumentParser) -> None:
         help="What to do with the built system, as with nixos-rebuild: "
         "switch (the default), boot (activate at the next boot), "
         "test (activate now, without a boot entry), "
-        "dry-activate (show what a switch would do).",
+        "dry-activate (show what a switch would do). "
+        "A darwin machine can only switch.",
     )
     parser.add_argument(
         "--force",

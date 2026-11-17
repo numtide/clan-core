@@ -601,6 +601,10 @@ def run_machine_update(
             generating vars.
 
     """
+    if machine._class_ == "darwin" and deploy_record.action() != "switch":
+        msg = f"--action {deploy_record.action()} is not supported for darwin machine {machine.name}: darwin-rebuild can only switch"
+        raise ClanError(msg)
+
     with ExitStack() as stack:
         _target_host: Host = cast(
             "Host", stack.enter_context(target_host.host_connection())
@@ -619,7 +623,7 @@ def run_machine_update(
 
         # before anything changes on the machine; a specialisation is not the
         # system a record names
-        track = machine._class_ == "nixos" and specialisation is None
+        track = specialisation is None
         if track:
             deploy_record.check(machine.flake, target_host_root, machine.name)
 
@@ -653,6 +657,7 @@ def run_machine_update(
                 build_host=_build_host,
                 target_host=_target_host,
                 target_host_root=target_host_root,
+                track=track,
             )
         else:
             msg = f"Unsupported machine type: {machine._class_}\n\nUpdate for this type is not handled yet.\n"
@@ -757,6 +762,7 @@ def _update_darwin(
     build_host: "Host",
     target_host: "Host",
     target_host_root: "Host",
+    track: bool,
 ) -> None:
     """Darwin machines still use darwin-rebuild."""
     nix_options = _nix_options_from_machine(machine)
@@ -770,13 +776,26 @@ def _update_darwin(
 
     switch_cmd = _build_darwin_rebuild_cmd(machine.name, flake_store_path, nix_options)
 
-    build_host.run(
-        switch_cmd,
-        RunOpts(
-            log=Log.BOTH,
-            msg_color=MsgColor(stderr=AnsiColor.DEFAULT),
-            needs_user_terminal=True,
-            prefix=machine.name,
-        ),
-        extra_env=extra_env,
-    )
+    before = deploy_record.profile(target_host_root, machine.name) if track else None
+    switched = False
+    try:
+        build_host.run(
+            switch_cmd,
+            RunOpts(
+                log=Log.BOTH,
+                msg_color=MsgColor(stderr=AnsiColor.DEFAULT),
+                needs_user_terminal=True,
+                prefix=machine.name,
+            ),
+            extra_env=extra_env,
+        )
+        switched = True
+    finally:
+        if track:
+            system = deploy_record.profile(target_host_root, machine.name)
+            # a switch that failed before its generation leaves the old one,
+            # which is not ours to label
+            if system and (switched or system != before):
+                deploy_record.write(
+                    machine.flake, target_host_root, machine.name, system
+                )

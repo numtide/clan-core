@@ -1,4 +1,4 @@
-"""Who deployed what to a NixOS machine.
+"""Who deployed what to a machine.
 
 An update leaves a record next to the generation it made. The next update
 refuses to run when the machine has something that the local checkout does
@@ -102,6 +102,15 @@ def _blocked(flake: Flake, src: dict[str, Any], out: str) -> str | None:
     ):
         return f"it runs a commit that is not in HEAD ({by})"
     return None
+
+
+def profile(host: "Host", machine_name: str) -> str | None:
+    """The system of the newest generation, for darwin-rebuild, which does not report it."""
+    res = host.run(
+        ["readlink", "-f", f"{PROFILES}/system"],
+        RunOpts(check=False, log=Log.NONE, prefix=machine_name, trace=False),
+    )
+    return res.stdout.strip() or None if res.returncode == 0 else None
 
 
 def check(flake: Flake, host: "Host", machine_name: str) -> None:
